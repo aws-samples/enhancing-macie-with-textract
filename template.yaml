@@ -1,0 +1,335 @@
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  ExistingS3BucketName:
+    Type: String
+    Default: ''
+    Description: Enter the name of your existing S3 bucket (optional)
+  MacieCustomIdRegex:
+    Type: String
+    Description: Enter a regex for the Macie Custom Identifier
+  EmailAddress:
+    Type: String
+    Description: Enter a valid email address for the SNS notification on completed Macie jobs
+  MacieLogGroupExists:
+    Type: String
+    AllowedValues: ['Yes', 'yes', 'Y', 'y', 'No', 'no', 'N', 'n']
+    Description: Does '/aws/macie/classificationjobs' exist in your CloudWatch Log Group?
+
+
+Conditions:
+  CreateNewS3Bucket: !Equals 
+    - !Ref ExistingS3BucketName
+    - ''
+  CreateMacieLogGroup: !Or
+    - !Equals [!Ref MacieLogGroupExists, "No"]
+    - !Equals [!Ref MacieLogGroupExists, "no"]
+    - !Equals [!Ref MacieLogGroupExists, "N"]
+    - !Equals [!Ref MacieLogGroupExists, "n"]
+
+Resources:
+  S3WithSensitiveData:
+    Type: AWS::S3::Bucket
+    Condition: CreateNewS3Bucket
+    Properties:
+      BucketName: !Sub
+        - s3-with-sensitive-data-${AWS::AccountId}-${RandomGUID}
+        - RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId ]]]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: alias/aws/s3
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  S3WithSensitiveDataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateNewS3Bucket
+    Properties:
+      Bucket: !Ref S3WithSensitiveData
+      PolicyDocument:
+        Id: RequireEncryptionInTransit
+        Version: '2012-10-17'
+        Statement:
+          - Principal: '*'
+            Action: '*'
+            Effect: Deny
+            Resource:
+              - !GetAtt S3WithSensitiveData.Arn
+              - !Sub ${S3WithSensitiveData.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  TextractServiceRole:              
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Sid: "ConfusedDeputyPreventionExamplePolicy"
+          Effect: Allow
+          Principal:
+            Service: textract.amazonaws.com
+          Action: sts:AssumeRole
+          Condition:
+            ArnLike:
+              aws:SourceArn: !Sub arn:aws:textract:*:${AWS::AccountId}:*
+            StringEquals: 
+              aws:SourceAccount: !Ref AWS::AccountId
+      Description: Textract Service Role
+      ManagedPolicyArns: 
+        - !Sub arn:aws:iam::aws:policy/service-role/AmazonTextractServiceRole
+  
+  TextractTriggerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: TextractTriggerLambda
+      CodeUri: src/TextractTriggerLambda
+      Handler: handler.handler
+      Runtime: python3.12
+      MemorySize: 3008
+      Timeout: 30
+      Tracing: Active
+      Environment:
+        Variables:
+          TEXTRACTJOBSTATUSTABLE_TABLE_NAME: !Ref TextractJobStatusTable
+          TEXTRACTJOBSTATUSTABLE_TABLE_ARN: !GetAtt TextractJobStatusTable.Arn
+          S3WITHSENSITIVEDATA_BUCKET_NAME: !If [CreateNewS3Bucket, !Ref S3WithSensitiveData, !Ref ExistingS3BucketName] 
+          TEXTRACT_SNS_TOPIC_ARN: !Ref TextractSNSTopic
+          TEXTRACT_SERVICE_ROLE_ARN: !GetAtt TextractServiceRole.Arn
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectAcl
+              - s3:GetObjectLegalHold
+              - s3:GetObjectRetention
+              - s3:GetObjectTorrent
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionAcl
+              - s3:GetObjectVersionForReplication
+              - s3:GetObjectVersionTorrent
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:ListBucketVersions
+              - s3:ListMultipartUploadParts
+              - s3:AbortMultipartUpload
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:RestoreObject
+            Resource: !If 
+              - CreateNewS3Bucket
+              - - !Sub arn:${AWS::Partition}:s3:::${S3WithSensitiveData}
+                - !Sub arn:${AWS::Partition}:s3:::${S3WithSensitiveData}/*
+              - - !Sub arn:${AWS::Partition}:s3:::${ExistingS3BucketName}
+                - !Sub arn:${AWS::Partition}:s3:::${ExistingS3BucketName}/*
+          - Sid: AllowPassRoleForTextractServiceRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt TextractServiceRole.Arn
+
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TextractJobStatusTable
+        - TextractDetectAnalyzePolicy: {}
+        - TextractGetResultPolicy: {}
+
+  TextractTriggerLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${TextractTriggerLambda}
+      
+  TextractJobStatusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Status
+          AttributeType: S
+        - AttributeName: JobId
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: Status
+          KeyType: HASH
+        - AttributeName: JobId
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: True
+
+  TextractSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: AmazonTextractJobSNSTopic
+      Subscription:
+        - Endpoint: !GetAtt MacieTriggerLambda.Arn
+          Protocol: lambda
+  
+  LambdaInvokePermission: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn:  !Ref TextractSNSTopic 
+      FunctionName: !Ref MacieTriggerLambda
+
+  MacieCustomIdentifier:
+    Type: AWS::Macie::CustomDataIdentifier
+    Properties:
+      Description: Macie Custom Identifier for Macie Enhanced workshop
+      Name: Macie Enhanced Custom Identifier
+      Regex: !Ref MacieCustomIdRegex
+
+  MacieTriggerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: MacieTriggerLambda
+      CodeUri: src/MacieTriggerLambda
+      Handler: handler.handler
+      Runtime: python3.12
+      MemorySize: 3008
+      Timeout: 30
+      Tracing: Active
+      Environment:
+        Variables:
+          TEXTRACTJOBSTATUSTABLE_TABLE_NAME: !Ref TextractJobStatusTable
+          TEXTRACTJOBSTATUSTABLE_TABLE_ARN: !GetAtt TextractJobStatusTable.Arn
+          MACIECUSTOMIDENTIFIER: !Ref MacieCustomIdentifier
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectAcl
+              - s3:GetObjectLegalHold
+              - s3:GetObjectRetention
+              - s3:GetObjectTorrent
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionAcl
+              - s3:GetObjectVersionForReplication
+              - s3:GetObjectVersionTorrent
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:ListBucketVersions
+              - s3:ListMultipartUploadParts
+              - s3:AbortMultipartUpload
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:RestoreObject
+            Resource: !If 
+              - CreateNewS3Bucket
+              - - !Sub arn:${AWS::Partition}:s3:::${S3WithSensitiveData}
+                - !Sub arn:${AWS::Partition}:s3:::${S3WithSensitiveData}/*
+              - - !Sub arn:${AWS::Partition}:s3:::${ExistingS3BucketName}
+                - !Sub arn:${AWS::Partition}:s3:::${ExistingS3BucketName}/*
+          - Effect: Allow
+            Action: 
+              - macie2:CreateClassificationJob
+            Resource: 
+              - !Sub arn:${AWS::Partition}:macie2:*:${AWS::AccountId}:classification-job/*
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TextractJobStatusTable
+
+  MacieTriggerLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${MacieTriggerLambda}
+
+  MacieLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/macie/classificationjobs
+      Condition: CreateMacieLogGroup
+
+# CloudWatch Log Group subscription filter for Macie completed jobs
+  MacieCWLogSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      DestinationArn: !GetAtt MacieCompletedSNSLambda.Arn
+      FilterName: MacieJobCompleted
+      FilterPattern: '{$.eventType = JOB_COMPLETED}'
+      LogGroupName: /aws/macie/classificationjobs
+
+
+# SNS for completed Macie jobs
+  MacieSnsTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: macie_notification
+        TopicName: MacieSnsTopic
+        Subscription:
+          - Endpoint: 
+              Ref: EmailAddress
+            Protocol: email
+# Lambda to format SNS for complete Macie scans
+  MacieCompletedSNSLambda:
+      Type: AWS::Serverless::Function
+      Properties:
+        Description: !Sub
+          - Stack ${AWS::StackName} Function ${ResourceName}
+          - ResourceName: MacieCompletedSNSLambda
+        CodeUri: src/MacieCompletedSNSLambda
+        Role: !GetAtt MacieCompletedSNSLambdaRole.Arn
+        Handler: handler.handler
+        Runtime: python3.12
+        MemorySize: 3008
+        Timeout: 30
+        Tracing: Active
+        Environment:
+          Variables:
+            TOPIC_ARN: !Ref MacieSnsTopic
+        
+  MacieCompletedSNSLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CloudWatchLogsInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                  - logs:CreateLogSubscription
+                  - logs:PutSubscriptionFilter
+                Resource: 
+                  - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:* 
+              - Effect: Allow
+                Action: 
+                  - sns:Publish
+                Resource: 
+                  - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:MacieSnsTopic
+  CwLogsTriggerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt MacieCompletedSNSLambda.Arn
+      Principal: logs.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/macie/classificationjobs:*
