@@ -1,17 +1,16 @@
 # Enhancing Macie data discovery capabilities with Textract as an overlay
 
-This solution uses Amazon Textract as an additional conversion layer to convert image data into a JSON format that is supported by Macie. This enhancement effectively expends the coverage capabilities of what Macie can offer.
+This solution uses Amazon Textract as an additional conversion layer to convert image data into a text file format that is supported by Macie. This enhancement effectively expends the coverage capabilities of what Macie can offer.
 
 
 AWS Services used
-- Application Composer - to generate baseline template and resources
 - Amazon Textract
 - Amazon Macie
 - AWS Lambda
-- Amazon Simple notification service
+- Amazon Simple Notification Service (SNS)
 - Amazon DynamoDB
 - Amazon S3
-- Amazon EventBridge
+- Amazon Cloudwatch logs
 
 Solution Architecture
 ![solution-architecture](/static/images/architecture-diagram.png)
@@ -61,7 +60,8 @@ Note: List of descriptions to some of the requested parameters
 ## Clean up the resources
 To clean up the resources that you created for this example, follow the steps below:
 
-1. To empty your S3 bucket, go to S3 and select for your bucket name starting with "s3-with-sensitive-data". Click “Empty" and follow the instruction on screen to empty it
-2. Either (1) go to the CloudFormation console and delete the stack, or (2) run the following in your terminal to delete with AWS SAM CLI:
-`sam delete`
-3. Follow through the instruction on your terminal and select `y` when prompted for the decision to delete the stack.
+1. If you did not set up the scan on your own S3 bucket, empty the S3 bucket that was created as part of the solution. Open the Amazon S3 console, search for the bucket name `s3-with-sensitive-data-<account-id>-<random-string>` and choose Empty. 
+2. Delete the CloudFormation stack by either:
+    -	Using the CloudFormation console to delete the stack or
+    - Using AWS SAM CLI to run `sam delete` in your terminal. Follow the instructions and enter `y` when prompted to delete the stack.
+
