@@ -4,9 +4,10 @@ Parameters:
     Type: String
     Default: ''
     Description: Enter the name of your existing S3 bucket (optional)
-  MacieCustomIdRegex:
-    Type: String
-    Description: Enter a regex for the Macie Custom Identifier
+  MacieCustomIdentifierIDList:
+    Type: CommaDelimitedList
+    AllowedPattern: '^(?!^\s*$)[\w-]+(?:,\s*[\w-]+)*$'
+    Description: Enter macie custom idenfier IDs as a comma-separated list
   EmailAddress:
     Type: String
     Description: Enter a valid email address for the SNS notification on completed Macie jobs
@@ -165,13 +166,13 @@ Resources:
       SSESpecification:
         SSEEnabled: true
         SSEType: KMS
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: True
 
   TextractSNSTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: AmazonTextractJobSNSTopic
+      TopicName: !Sub
+        - AmazonTextractJobSNSTopic-${AWS::AccountId}-${RandomGUID}
+        - RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId ]]]]
       Subscription:
         - Endpoint: !GetAtt MacieTriggerLambda.Arn
           Protocol: lambda
@@ -183,13 +184,6 @@ Resources:
       Principal: sns.amazonaws.com
       SourceArn:  !Ref TextractSNSTopic 
       FunctionName: !Ref MacieTriggerLambda
-
-  MacieCustomIdentifier:
-    Type: AWS::Macie::CustomDataIdentifier
-    Properties:
-      Description: Macie Custom Identifier for Macie Enhanced workshop
-      Name: Macie Enhanced Custom Identifier
-      Regex: !Ref MacieCustomIdRegex
 
   MacieTriggerLambda:
     Type: AWS::Serverless::Function
@@ -207,7 +201,7 @@ Resources:
         Variables:
           TEXTRACTJOBSTATUSTABLE_TABLE_NAME: !Ref TextractJobStatusTable
           TEXTRACTJOBSTATUSTABLE_TABLE_ARN: !GetAtt TextractJobStatusTable.Arn
-          MACIECUSTOMIDENTIFIER: !Ref MacieCustomIdentifier
+          MACIE_CUSTOM_IDENTIFIER_ID_COMMA_SEPARATED_STRING: !Join [",", !Ref MacieCustomIdentifierIDList]
       Policies:
         - Statement:
           - Effect: Allow

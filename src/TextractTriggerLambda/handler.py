@@ -21,12 +21,10 @@ def handler(event, context):
     # create empty list for final information
     image_files_to_scan = []
 
-    # only looking at images extensions
-    extensions = ['png', 'jpg']
-
     # Iterate through files and only process the images
     for file in files:
-        if file.key[-3:] in extensions:
+        # Only looking at images extensions, Check if the file key ends with '.png', '.jpg', or '.jpeg'
+        if file.key.lower().endswith(('.png', '.jpg', '.jpeg')):
             image_files_to_scan.append({'object_key' : file.key, 'extension' : file.key[-3:]})
     
             print(f'Processing {S3_BUCKET_NAME}/{file.key}')
@@ -68,8 +66,6 @@ def start_textract_job(documentation_location, output_config, notification_chann
         OutputConfig=output_config,
         NotificationChannel=notification_channel
     )
-    # response_update = textract.get_document_text_detection(JobId=response['JobId'])
     job_id = response["JobId"]
-    # status = response_update["JobStatus"]
     status = "IN_PROGRESS"
     return job_id, status

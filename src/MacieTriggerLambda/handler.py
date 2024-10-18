@@ -4,7 +4,8 @@ import os
 from datetime import datetime
 
 DDB_TABLE_NAME = os.environ['TEXTRACTJOBSTATUSTABLE_TABLE_NAME']
-MACIE_CUSTOM_IDENTIFIER_ID = os.environ['MACIECUSTOMIDENTIFIER']
+MACIE_CUSTOM_IDENTIFIER_ID_COMMA_SEPARATED_STRING = os.environ['MACIE_CUSTOM_IDENTIFIER_ID_COMMA_SEPARATED_STRING'] 
+MACIE_CUSTOM_IDENTIFIER_ID_LIST = [item.strip() for item in MACIE_CUSTOM_IDENTIFIER_ID_COMMA_SEPARATED_STRING.split(',')]
 
 ddb = boto3.client('dynamodb')
 s3 = boto3.client('s3')
@@ -36,6 +37,45 @@ def handler(event, context):
     existing_item = existing_item_response.get('Item')
     start_timestamp = existing_item.get('StartTimestamp')
     complete_timestamp = datetime.now().isoformat(timespec='seconds')
+    
+    # Postprocessing on textract output file
+    # Rename the textract output object to follow image object key    
+    if job_status == 'SUCCEEDED':
+        original_object_key = f'textract-output/{job_id}/1'
+
+        if object_key.endswith(('.png', '.jpg')):
+            new_object_key = f'textract-output/{job_id}/{object_key[:-4]}' + '.json'
+        if object_key.endswith(('.jpeg')):
+            new_object_key = f'textract-output/{job_id}/{object_key[:-5]}' + '.json'
+
+        s3.copy_object(
+            CopySource= {'Bucket': bucket_name, 'Key': original_object_key},
+            Bucket=bucket_name, 
+            Key=new_object_key
+            )
+        s3.delete_object(Bucket=bucket_name, Key=original_object_key)
+    
+    # Create a new txt file containing only the the extracted text 
+        # Retrieve JSON data from S3
+        response = s3.get_object(Bucket=bucket_name, Key=new_object_key)
+        json_data = response['Body'].read().decode('utf-8')
+        
+        # Parse the JSON data
+        parsed_data = json.loads(json_data)
+        
+        # Extract the "Text" key from each dictionary in the list
+        texts = [block["Text"] for block in parsed_data['Blocks']]
+               
+        # Create TXT file with extracted text
+        texts = [text for text in texts if text is not None]
+        output_txt_data = '\n'.join(texts)
+        output_txt_file_key = f'{new_object_key[:-5]}-postprocessed'+'.txt'
+    
+        # Upload the TXT file to S3
+        s3.put_object(Bucket=bucket_name, Key=output_txt_file_key, Body=output_txt_data.encode('utf-8'))
+        
+        print("Extracted text has been stored in S3 as", output_txt_file_key)
+        
     
     #update job status in DynamoDB, since its the partition key, have to delete and recreate the item with the new keys in a transaction
     put_transaction_item = [
@@ -83,20 +123,10 @@ def handler(event, context):
     except Exception as e:
         print("Error in transaction:", e)
     
-    # Rename the textract output object to follow image object key    
-    if job_status == 'SUCCEEDED':
-        original_object_key = f'textract-output/{job_id}/1'
-        new_object_key = f'textract-output/{job_id}/' + object_key[:-4] + '.json'
-        
-        s3.copy_object(
-            CopySource= {'Bucket': bucket_name, 'Key': original_object_key}, 
-            Bucket=bucket_name, 
-            Key=new_object_key
-            )
-        s3.delete_object(Bucket=bucket_name, Key=original_object_key)
+    
     macie_scan(context, job_id, bucket_name, new_object_key)
     
-## YT starts here
+
 def macie_scan(context, job_id, bucket_name, object_key):  
     # Query DynamoDB to check for any jobs that are still in progress
     in_progress_jobs = ddb.query(
@@ -114,10 +144,12 @@ def macie_scan(context, job_id, bucket_name, object_key):
 
     # If yes, end
     if 'Items' in in_progress_jobs and in_progress_jobs['Items']:
+        print ("Other async textract jobs are still in progress")
         return None
     # If no, trigger macie scan
     else:
         # Get jobs which have finished Textract scan but not Macie scan
+        print ("All async textract jobs done but macie scan not done")
         completed_jobs = ddb.query(
             TableName=DDB_TABLE_NAME,
             ExpressionAttributeValues={
@@ -138,18 +170,24 @@ def macie_scan(context, job_id, bucket_name, object_key):
         object_keys = []
         job_ids = []
         for job in completed_jobs['Items']:
-            job_object_key = f'textract-output/' + job['JobId']['S'] + '/' + job['ObjectKey']['S'][:-4] + '.json'
+            if job['ObjectKey']['S'].endswith(('.png', '.jpg')):
+                job_object_key = f'textract-output/{job['JobId']['S']}/{job['ObjectKey']['S'][:-4]}' + '.json'
+            if job['ObjectKey']['S'].endswith(('.jpeg')):
+                job_object_key = f'textract-output/{job['JobId']['S']}/{job['ObjectKey']['S'][:-5]}' + '.json'
+
             object_keys.append(job_object_key)
+            postprocessed_object_key = f'{job_object_key[:-5]}-postprocessed' +'.txt'
+            object_keys.append(postprocessed_object_key)
             job_ids.append(job['JobId']['S'])
 
-        # start Macie scane for new jobs
+        # start Macie scan for new jobs
         try:
+            print ("Starting Macie scan")
             response = macie.create_classification_job(
                 jobType='ONE_TIME',
                 name=f'Scan for {len(object_keys)} objects {datetime.now()}',
-                customDataIdentifierIds=[
-                    MACIE_CUSTOM_IDENTIFIER_ID
-                ],
+                customDataIdentifierIds= MACIE_CUSTOM_IDENTIFIER_ID_LIST,
+                managedDataIdentifierSelector='RECOMMENDED',
                 s3JobDefinition={
                     'bucketDefinitions': [
                         {
@@ -191,9 +229,3 @@ def macie_scan(context, job_id, bucket_name, object_key):
             except Exception as e:
                 print("Error in transaction:", e)
         return True
-            
-            
-    
-    
-
-
