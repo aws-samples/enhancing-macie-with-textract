@@ -8,8 +8,8 @@ TEXTRACT_SNS_TOPIC_ARN = os.environ['TEXTRACT_SNS_TOPIC_ARN']
 TEXTRACT_SERVICE_ROLE_ARN = os.environ['TEXTRACT_SERVICE_ROLE_ARN']
 S3_BUCKET_NAME = os.environ['S3WITHSENSITIVEDATA_BUCKET_NAME']
 
-textract = boto3.client('textract')
-ddb = boto3.client('dynamodb')
+textract_client = boto3.client('textract')
+ddb_client = boto3.client('dynamodb')
 
 s3 = boto3.resource('s3')
 bucket = s3.Bucket(S3_BUCKET_NAME)
@@ -18,14 +18,10 @@ def handler(event, context):
     #get all file information from S3 bucket
     files = bucket.objects.all()
 
-    # create empty list for final information
-    image_files_to_scan = []
-
     # Iterate through files and only process the images
     for file in files:
         # Only looking at images extensions, Check if the file key ends with '.png', '.jpg', or '.jpeg'
         if file.key.lower().endswith(('.png', '.jpg', '.jpeg')):
-            image_files_to_scan.append({'object_key' : file.key, 'extension' : file.key[-3:]})
     
             print(f'Processing {S3_BUCKET_NAME}/{file.key}')
             document_location = {
@@ -48,7 +44,7 @@ def handler(event, context):
             
             time_stamp = datetime.now().isoformat(timespec='seconds')
 
-            ddb.put_item(
+            ddb_client.put_item(
                 TableName=DDB_TABLE_NAME, 
                 Item={
                     'JobId': {'S': job_id}, 
@@ -61,7 +57,7 @@ def handler(event, context):
             print(f'Textract job {job_id} details have been added to DynamoDB')
 
 def start_textract_job(documentation_location, output_config, notification_channel):
-    response = textract.start_document_text_detection(
+    response = textract_client.start_document_text_detection(
         DocumentLocation=documentation_location,
         OutputConfig=output_config,
         NotificationChannel=notification_channel
